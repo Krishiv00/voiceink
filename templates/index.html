@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VoiceInk</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+  <div id="drop-overlay">
+    <div id="drop-overlay-text">Drop file to load</div>
+  </div>
+
+  <header id="top-bar">
+    <button id="btn-new" class="icon-btn" title="Close this document and load another" aria-label="New document">+</button>
+    <div id="brand">Voice<span>Ink</span></div>
+    <div id="source-label"></div>
+    <div id="buffer-indicator">
+      <div id="buffer-dot" class="dot-idle"></div>
+      <span id="buffer-status">idle</span>
+    </div>
+    <button id="btn-vocabulary" class="icon-btn" title="Settings" aria-label="Settings">&#9776;</button>
+  </header>
+
+  <div id="vocab-backdrop"></div>
+  <aside id="vocab-sidebar" aria-hidden="true">
+    <div id="vocab-sidebar-header">
+      <h2>Settings</h2>
+      <button id="btn-vocab-close" class="icon-btn" aria-label="Close settings">&times;</button>
+    </div>
+    <section class="vocab-section">
+      <h3>Voice</h3>
+      <div class="config-group config-group-stacked">
+        <select id="voice-select" class="vocab-select">
+          {% for v in available_voices %}
+          <option value="{{ v.id }}" {% if v.id == saved_voice %}selected{% endif %}>{{ v.label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    </section>
+
+    <section class="vocab-section">
+      <h3>Punctuation</h3>
+      <div id="vocab-punct-list">
+        {% for p in vocabulary.punctuation %}
+        <div class="vocab-punct-row" data-symbol="{{ p.symbol }}">
+          <span class="vocab-symbol">{{ p.symbol }}</span>
+          <input type="text" class="vocab-punct-name" value="{{ p.name }}" placeholder="{{ p.default_name }}" {% if p.muted %}disabled{% endif %}>
+          <label class="vocab-mute-toggle">
+            <input type="checkbox" class="vocab-mute-checkbox" {% if p.muted %}checked{% endif %}>
+            <span>Mute</span>
+          </label>
+        </div>
+        {% endfor %}
+      </div>
+    </section>
+
+    <section class="vocab-section">
+      <h3>Structure cues</h3>
+      <div id="vocab-cue-list">
+        {% for c in vocabulary.cues %}
+        <div class="vocab-cue-row" data-key="{{ c.key }}">
+          <label>{{ c.key.replace('_', ' ')|capitalize }}</label>
+          <input type="text" class="vocab-cue-text" value="{{ c.text }}" placeholder="{{ c.default_text }}">
+        </div>
+        {% endfor %}
+        <div class="vocab-cue-row" data-key="heading_level_template">
+          <label>Heading with level <span class="vocab-sub-hint">(use <code>{level}</code>)</span></label>
+          <input type="text" id="vocab-heading-template" class="vocab-cue-text" value="{{ vocabulary.heading_level_cue_template.value }}" placeholder="{{ vocabulary.heading_level_cue_template.default }}">
+        </div>
+      </div>
+    </section>
+
+    <div id="vocab-sidebar-actions">
+      <button id="btn-vocab-reset" class="pill-btn">Reset to defaults</button>
+      <button id="btn-vocab-save" class="pill-btn pill-btn-accent">Save</button>
+    </div>
+    <div id="vocab-save-status"></div>
+  </aside>
+
+  <main id="stage">
+    <div id="input-area">
+      <div id="input-card">
+        <div id="input-loading-overlay">
+          <div id="input-loading-spinner"></div>
+          <div id="input-loading-text">Reading document&hellip;</div>
+        </div>
+        <h1>Load something to write</h1>
+        <p class="hint">Paste text below, or drop a file.</p>
+        <textarea id="paste-box" placeholder="Paste your text here..."></textarea>
+        <div id="input-actions">
+          <button id="btn-load-text">Narrate this text</button>
+          <label id="file-picker-label" for="file-picker">or choose a file ({{ supported_extensions|join(', ') }})</label>
+          <input type="file" id="file-picker" accept=".{{ supported_extensions|join(',.') }}" hidden>
+        </div>
+        <div id="load-error"></div>
+      </div>
+    </div>
+
+    <div id="text-display" style="display:none;"></div>
+  </main>
+
+  <footer id="control-dock">
+    <div id="seek-row">
+      <input type="range" id="seek-slider" min="0" max="0" value="0" step="1" disabled title="Drag to jump to any unit">
+      <span id="progress-label">—</span>
+    </div>
+    <div id="control-row">
+      <div id="transport">
+        <button id="btn-back" class="transport-btn" disabled title="Back one unit (Left arrow)">&#171;</button>
+        <button id="btn-play" class="transport-btn" disabled title="Play / Resume (Space)">&#9658;</button>
+        <button id="btn-pause" class="transport-btn" disabled title="Pause (Space)" style="display:none;">&#10073;&#10073;</button>
+        <button id="btn-forward" class="transport-btn" disabled title="Forward one unit (Right arrow)">&#187;</button>
+        <button id="btn-restart" class="transport-btn" disabled title="Restart">&#8634;</button>
+      </div>
+      <div id="settings-panel">
+        <div class="config-group">
+          <label for="speed-slider">Writing speed <span id="speed-value">{{ saved_chars_per_minute|int }}</span> chars/min</label>
+          <input type="range" id="speed-slider" min="40" max="400" step="10" value="{{ saved_chars_per_minute }}">
+        </div>
+        <div class="config-group">
+          <label for="rate-slider">Narration rate <span id="rate-value">{{ "%+d"|format(saved_speech_rate_pct) }}%</span></label>
+          <input type="range" id="rate-slider" min="-50" max="50" step="5" value="{{ saved_speech_rate_pct }}">
+        </div>
+      </div>
+    </div>
+  </footer>
+
+  <audio id="audio-player" preload="auto"></audio>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
