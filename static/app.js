@@ -1,4 +1,53 @@
 (() => {
+  const STORAGE_KEY = 'voiceink:settings';
+  const VOCAB_STORAGE_KEY = 'voiceink:vocabulary';
+
+  function loadLocalSettings() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      return (parsed && typeof parsed === 'object') ? parsed : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function saveLocalSettings(settings) {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+    } catch (e) {
+      console.error('Could not save settings locally', e);
+    }
+  }
+
+  function loadLocalVocabulary() {
+    try {
+      const raw = localStorage.getItem(VOCAB_STORAGE_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      return (parsed && typeof parsed === 'object') ? parsed : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function saveLocalVocabulary(vocabulary) {
+    try {
+      localStorage.setItem(VOCAB_STORAGE_KEY, JSON.stringify(vocabulary));
+    } catch (e) {
+      console.error('Could not save vocabulary locally', e);
+    }
+  }
+
+  function currentSettingsPayload() {
+    return {
+      chars_per_minute: parseFloat(el.speedSlider.value),
+      speech_rate_pct: parseInt(el.rateSlider.value, 10),
+      voice: el.voiceSelect ? el.voiceSelect.value : undefined,
+    };
+  }
+
   const el = {
     inputArea: document.getElementById('input-area'),
     textDisplay: document.getElementById('text-display'),
@@ -35,6 +84,22 @@
     inputLoadingOverlay: document.getElementById('input-loading-overlay'),
     inputLoadingText: document.getElementById('input-loading-text'),
   };
+
+  (function applyStoredSettingsToForm() {
+    const saved = loadLocalSettings();
+    if (!saved) return;
+    if (typeof saved.chars_per_minute === 'number') {
+      el.speedSlider.value = saved.chars_per_minute;
+      el.speedValue.textContent = Math.round(saved.chars_per_minute);
+    }
+    if (typeof saved.speech_rate_pct === 'number') {
+      el.rateSlider.value = saved.speech_rate_pct;
+      el.rateValue.textContent = `${saved.speech_rate_pct >= 0 ? '+' : ''}${saved.speech_rate_pct}%`;
+    }
+    if (saved.voice && el.voiceSelect) {
+      el.voiceSelect.value = saved.voice;
+    }
+  })();
 
   let hasDoc = false;
   let totalChunks = 0;
@@ -319,6 +384,7 @@
           return;
         }
         applyVocabPayloadToForm(data);
+        saveLocalVocabulary(collectVocabPayload());
         setVocabStatus('Saved. Takes effect on the next document you load.', 'success');
       } catch (e) {
         console.error(e);
@@ -345,6 +411,7 @@
           return;
         }
         applyVocabPayloadToForm(data);
+        localStorage.removeItem(VOCAB_STORAGE_KEY);
         setVocabStatus('Reset to defaults.', 'success');
       } catch (e) {
         console.error(e);
@@ -367,7 +434,11 @@
       const resp = await fetch('/api/load/text', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
+        body: JSON.stringify({
+          text,
+          settings: currentSettingsPayload(),
+          vocabulary: loadLocalVocabulary() || {},
+        }),
       });
       await startSessionFromResponse(resp);
     } finally {
@@ -387,6 +458,8 @@
     try {
       const formData = new FormData();
       formData.append('file', file);
+      formData.append('settings', JSON.stringify(currentSettingsPayload()));
+      formData.append('vocabulary', JSON.stringify(loadLocalVocabulary() || {}));
       const resp = await fetch('/api/load/file', { method: 'POST', body: formData });
       await startSessionFromResponse(resp);
     } finally {
@@ -730,11 +803,7 @@
       }
     }
     try {
-      const payload = {
-        chars_per_minute: parseFloat(el.speedSlider.value),
-        speech_rate_pct: parseInt(el.rateSlider.value, 10),
-      };
-      if (el.voiceSelect) payload.voice = el.voiceSelect.value;
+      const payload = currentSettingsPayload();
       const resp = await fetch('/api/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -743,6 +812,8 @@
       if (!resp.ok) {
         const data = await resp.json().catch(() => ({ error: 'Failed to update settings' }));
         console.error(data.error || 'Failed to update settings');
+      } else {
+        saveLocalSettings(payload);
       }
     } catch (e) {
       console.error(e);

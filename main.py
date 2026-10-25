@@ -3,6 +3,8 @@ import socket
 import sys
 import threading
 
+os.environ.setdefault("DESKTOP_MODE", "1")
+
 import webview
 
 webview.settings['OPEN_DEVTOOLS_IN_DEBUG'] = False

@@ -1,7 +1,10 @@
 import io
 import json
 import os
+import secrets
 import sys
+import threading
+import time
 import traceback
 from flask import Flask, request, jsonify, render_template, send_file, session as flask_session
 import uuid
@@ -19,9 +22,50 @@ from narration_prep import (
 from tts_engine import NarrationSession, UNITS_PER_CHUNK, AVAILABLE_VOICES, VOICE_IDS, DEFAULT_VOICE
 
 app = Flask(__name__)
-app.secret_key = "voiceink-local-secret"
+
+DESKTOP_MODE = os.environ.get("DESKTOP_MODE", "0") == "1"
+
+app.secret_key = os.environ.get("SECRET_KEY") or ("voiceink-local-secret" if DESKTOP_MODE else secrets.token_hex(32))
 
 SESSIONS: dict[str, NarrationSession] = {}
+SESSION_LOCK = threading.Lock()
+SESSION_MAX_IDLE_SECONDS = 2 * 60 * 60
+
+_last_touched: dict[str, float] = {}
+
+
+def _touch_session(sid: str) -> None:
+    _last_touched[sid] = time.time()
+
+
+def _drop_session(sid: str | None) -> None:
+    if not sid:
+        return
+    with SESSION_LOCK:
+        SESSIONS.pop(sid, None)
+        _last_touched.pop(sid, None)
+
+
+def _sweep_expired_sessions() -> None:
+    cutoff = time.time() - SESSION_MAX_IDLE_SECONDS
+    with SESSION_LOCK:
+        stale = [sid for sid, ts in _last_touched.items() if ts < cutoff]
+        for sid in stale:
+            SESSIONS.pop(sid, None)
+            _last_touched.pop(sid, None)
+
+
+def _sweeper_loop() -> None:
+    while True:
+        time.sleep(600)
+        try:
+            _sweep_expired_sessions()
+        except Exception as e:
+            print(f"[sessions] sweep failed: {type(e).__name__}: {e}")
+
+
+if not DESKTOP_MODE:
+    threading.Thread(target=_sweeper_loop, daemon=True).start()
 
 DEFAULT_CHARS_PER_MINUTE = 150.0
 DEFAULT_SPEECH_RATE_PCT = 0
@@ -125,8 +169,8 @@ def save_vocabulary(punct_overrides: dict, cue_overrides: dict, heading_level_cu
         print(f"[vocabulary] couldn't save {VOCABULARY_PATH} ({type(e).__name__}: {e})")
 
 
-def build_vocabulary_payload() -> dict:
-    saved = SAVED_VOCABULARY
+def build_vocabulary_payload(vocabulary: dict | None = None) -> dict:
+    saved = vocabulary if vocabulary is not None else SAVED_VOCABULARY
     return {
         "punctuation": [
             {
@@ -166,8 +210,54 @@ def _coerce_int(value, default: int) -> int:
         return default
 
 
-SAVED_SETTINGS = load_settings()
-SAVED_VOCABULARY = load_vocabulary()
+def _clean_settings(data: dict | None) -> dict:
+    data = data if isinstance(data, dict) else {}
+    cpm = _coerce_float(data.get("chars_per_minute"), DEFAULT_CHARS_PER_MINUTE)
+    rate = _coerce_int(data.get("speech_rate_pct"), DEFAULT_SPEECH_RATE_PCT)
+    voice = data.get("voice")
+    if voice not in VOICE_IDS:
+        voice = DEFAULT_VOICE
+    if not isfinite_positive(cpm):
+        cpm = DEFAULT_CHARS_PER_MINUTE
+    if not -100 <= rate <= 100:
+        rate = DEFAULT_SPEECH_RATE_PCT
+    return {"chars_per_minute": cpm, "speech_rate_pct": rate, "voice": voice}
+
+
+def isfinite_positive(value: float) -> bool:
+    import math
+    return math.isfinite(value) and value > 0
+
+
+def _clean_vocabulary(data: dict | None) -> dict:
+    data = data if isinstance(data, dict) else {}
+    punct_overrides = data.get("punct_overrides")
+    clean_punct = {}
+    if isinstance(punct_overrides, dict):
+        clean_punct = {
+            k: v for k, v in punct_overrides.items()
+            if k in CUSTOMIZABLE_PUNCT_KEYS and isinstance(v, str)
+        }
+    cue_overrides = data.get("cue_overrides")
+    clean_cues = {}
+    if isinstance(cue_overrides, dict):
+        clean_cues = {
+            k: v for k, v in cue_overrides.items()
+            if k in STRUCTURE_CUES and isinstance(v, str) and v.strip()
+        }
+    template = data.get("heading_level_cue_template")
+    clean_template = None
+    if isinstance(template, str) and "{level}" in template:
+        clean_template = template
+    return {
+        "punct_overrides": clean_punct,
+        "cue_overrides": clean_cues,
+        "heading_level_cue_template": clean_template,
+    }
+
+
+SAVED_SETTINGS = load_settings() if DESKTOP_MODE else _clean_settings(None)
+SAVED_VOCABULARY = load_vocabulary() if DESKTOP_MODE else _clean_vocabulary(None)
 
 
 @app.route("/")
@@ -199,7 +289,8 @@ def load_file():
     except Exception as e:
         return jsonify({"error": f"Failed to read file: {e}"}), 400
 
-    return _start_session(blocks, source_name=f.filename)
+    settings, vocabulary = _settings_and_vocabulary_from_form()
+    return _start_session(blocks, source_name=f.filename, settings=settings, vocabulary=vocabulary)
 
 
 @app.route("/api/load/text", methods=["POST"])
@@ -210,18 +301,36 @@ def load_text():
         return jsonify({"error": "No text provided"}), 400
 
     blocks = extract_plain_text(text)
-    return _start_session(blocks, source_name="Pasted text")
+    settings = SAVED_SETTINGS if DESKTOP_MODE else _clean_settings(data.get("settings"))
+    vocabulary = SAVED_VOCABULARY if DESKTOP_MODE else _clean_vocabulary(data.get("vocabulary"))
+    return _start_session(blocks, source_name="Pasted text", settings=settings, vocabulary=vocabulary)
 
 
-def _start_session(blocks, source_name: str):
+def _settings_and_vocabulary_from_form() -> tuple[dict, dict]:
+    if DESKTOP_MODE:
+        return SAVED_SETTINGS, SAVED_VOCABULARY
+    raw_settings = request.form.get("settings")
+    raw_vocabulary = request.form.get("vocabulary")
+    try:
+        settings_data = json.loads(raw_settings) if raw_settings else None
+    except ValueError:
+        settings_data = None
+    try:
+        vocabulary_data = json.loads(raw_vocabulary) if raw_vocabulary else None
+    except ValueError:
+        vocabulary_data = None
+    return _clean_settings(settings_data), _clean_vocabulary(vocabulary_data)
+
+
+def _start_session(blocks, source_name: str, settings: dict, vocabulary: dict):
     if not blocks:
         return jsonify({"error": "No readable text found in the input"}), 400
 
     units = build_narration_units(
         blocks,
-        punct_names=apply_punctuation_overrides(SAVED_VOCABULARY["punct_overrides"]),
-        structure_cues=apply_structure_cue_overrides(SAVED_VOCABULARY["cue_overrides"]),
-        heading_level_cue_template=SAVED_VOCABULARY["heading_level_cue_template"],
+        punct_names=apply_punctuation_overrides(vocabulary["punct_overrides"]),
+        structure_cues=apply_structure_cue_overrides(vocabulary["cue_overrides"]),
+        heading_level_cue_template=vocabulary["heading_level_cue_template"],
     )
     if not any(u.kind == "cluster" for u in units):
         return jsonify({"error": "No narratable words found in the input"}), 400
@@ -232,16 +341,18 @@ def _start_session(blocks, source_name: str):
     }
 
     old_sid = flask_session.pop("sid", None)
-    SESSIONS.pop(old_sid, None)
+    _drop_session(old_sid)
 
     sid = str(uuid.uuid4())
     narration_session = NarrationSession(
         units,
-        chars_per_minute=SAVED_SETTINGS["chars_per_minute"],
-        speech_rate_pct=SAVED_SETTINGS["speech_rate_pct"],
-        voice=SAVED_SETTINGS["voice"],
+        chars_per_minute=settings["chars_per_minute"],
+        speech_rate_pct=settings["speech_rate_pct"],
+        voice=settings["voice"],
     )
-    SESSIONS[sid] = narration_session
+    with SESSION_LOCK:
+        SESSIONS[sid] = narration_session
+        _touch_session(sid)
     flask_session["sid"] = sid
 
     unit_views = [
@@ -271,6 +382,7 @@ def get_chunk(index: int):
     narration_session = SESSIONS.get(sid)
     if narration_session is None:
         return jsonify({"error": "No active session. Load a document first."}), 400
+    _touch_session(sid)
 
     try:
         chunk = narration_session.get_chunk(index)
@@ -341,16 +453,18 @@ def update_config():
     narration_session = SESSIONS.get(sid)
 
     if narration_session is not None:
+        _touch_session(sid)
         narration_session.update_settings(
             chars_per_minute=new_cpm,
             speech_rate_pct=new_rate,
             voice=new_voice,
         )
 
-    SAVED_SETTINGS["chars_per_minute"] = new_cpm
-    SAVED_SETTINGS["speech_rate_pct"] = new_rate
-    SAVED_SETTINGS["voice"] = new_voice
-    save_settings(new_cpm, new_rate, new_voice)
+    if DESKTOP_MODE:
+        SAVED_SETTINGS["chars_per_minute"] = new_cpm
+        SAVED_SETTINGS["speech_rate_pct"] = new_rate
+        SAVED_SETTINGS["voice"] = new_voice
+        save_settings(new_cpm, new_rate, new_voice)
 
     return jsonify({
         "ok": True,
@@ -402,19 +516,27 @@ def update_vocabulary():
             }), 400
         clean_template = template
 
-    SAVED_VOCABULARY["punct_overrides"] = clean_punct
-    SAVED_VOCABULARY["cue_overrides"] = clean_cues
-    SAVED_VOCABULARY["heading_level_cue_template"] = clean_template
-    save_vocabulary(clean_punct, clean_cues, clean_template)
+    new_vocabulary = {
+        "punct_overrides": clean_punct,
+        "cue_overrides": clean_cues,
+        "heading_level_cue_template": clean_template,
+    }
 
-    return jsonify({"ok": True, **build_vocabulary_payload()})
+    if DESKTOP_MODE:
+        SAVED_VOCABULARY["punct_overrides"] = clean_punct
+        SAVED_VOCABULARY["cue_overrides"] = clean_cues
+        SAVED_VOCABULARY["heading_level_cue_template"] = clean_template
+        save_vocabulary(clean_punct, clean_cues, clean_template)
+        return jsonify({"ok": True, **build_vocabulary_payload()})
+
+    return jsonify({"ok": True, **build_vocabulary_payload(new_vocabulary)})
 
 
 
 @app.route("/api/new", methods=["POST"])
 def new_document():
     sid = flask_session.pop("sid", None)
-    SESSIONS.pop(sid, None)
+    _drop_session(sid)
     return jsonify({"ok": True})
 
 
@@ -424,56 +546,59 @@ def prefetch(index: int):
     narration_session = SESSIONS.get(sid)
     if narration_session is None:
         return jsonify({"error": "No active session"}), 400
+    _touch_session(sid)
     narration_session.prefetch_async(index)
     return jsonify({"ok": True})
 
 
 STARTUP_FILE_PATH: str | None = None
 
+if DESKTOP_MODE:
+    @app.route("/api/startup-file")
+    def get_startup_file():
+        global STARTUP_FILE_PATH
+        path = STARTUP_FILE_PATH
+        STARTUP_FILE_PATH = None
+        if not path or not os.path.isfile(path):
+            return jsonify({"path": None})
+        return jsonify({"path": path, "name": os.path.basename(path)})
 
-@app.route("/api/startup-file")
-def get_startup_file():
-    global STARTUP_FILE_PATH
-    path = STARTUP_FILE_PATH
-    STARTUP_FILE_PATH = None
-    if not path or not os.path.isfile(path):
-        return jsonify({"path": None})
-    return jsonify({"path": path, "name": os.path.basename(path)})
+    @app.route("/api/load/path", methods=["POST"])
+    def load_path():
+        data = request.get_json(force=True, silent=True) or {}
+        path = data.get("path")
+        if not isinstance(path, str) or not path:
+            return jsonify({"error": "No path provided"}), 400
+        if not os.path.isfile(path):
+            return jsonify({"error": "File not found"}), 404
 
+        name = os.path.basename(path)
+        try:
+            with open(path, "rb") as f:
+                file_bytes = f.read()
+            blocks = extract_file(name, file_bytes)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        except Exception as e:
+            return jsonify({"error": f"Failed to read file: {e}"}), 400
 
-@app.route("/api/load/path", methods=["POST"])
-def load_path():
-    data = request.get_json(force=True, silent=True) or {}
-    path = data.get("path")
-    if not isinstance(path, str) or not path:
-        return jsonify({"error": "No path provided"}), 400
-    if not os.path.isfile(path):
-        return jsonify({"error": "File not found"}), 404
-
-    name = os.path.basename(path)
-    try:
-        with open(path, "rb") as f:
-            file_bytes = f.read()
-        blocks = extract_file(name, file_bytes)
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        return jsonify({"error": f"Failed to read file: {e}"}), 400
-
-    return _start_session(blocks, source_name=name)
+        return _start_session(blocks, source_name=name, settings=SAVED_SETTINGS, vocabulary=SAVED_VOCABULARY)
 
 
 def main(startup_file: str | None = None):
     global STARTUP_FILE_PATH
     STARTUP_FILE_PATH = startup_file
 
-    app.run(debug=False, port=5151, use_reloader=False)
+    host = os.environ.get("HOST", "127.0.0.1")
+    port = int(os.environ.get("PORT", "5151"))
+    app.run(host=host, port=port, debug=False, use_reloader=False)
 
 
 if __name__ == "__main__":
-    import threading
     import webbrowser
 
-    threading.Timer(1.0, lambda: webbrowser.open("http://127.0.0.1:5151")).start()
+    host = os.environ.get("HOST", "127.0.0.1")
+    port = int(os.environ.get("PORT", "5151"))
+    threading.Timer(1.0, lambda: webbrowser.open(f"http://{host}:{port}")).start()
 
     main(sys.argv[1] if len(sys.argv) > 1 else None)
