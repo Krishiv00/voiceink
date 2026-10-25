@@ -28,6 +28,10 @@ body {
   overflow-x: hidden;
 }
 
+html {
+  scroll-padding-top: env(safe-area-inset-top, 0px);
+}
+
 body {
   display: flex;
   flex-direction: column;
@@ -62,6 +66,7 @@ body {
   flex-wrap: wrap;
   gap: 10px 16px;
   padding: 14px 24px;
+  padding-top: calc(14px + env(safe-area-inset-top, 0px));
   background: var(--bg-raised);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
@@ -230,6 +235,7 @@ input[type="range"]:focus-visible,
   align-items: center;
   justify-content: center;
   padding: 32px;
+  overflow-y: auto;
 }
 
 #input-card {
@@ -907,17 +913,69 @@ input[type="range"]:disabled::-moz-range-thumb {
   color: var(--gold-bright);
 }
 
+@media (max-width: 860px) {
+  #text-display {
+    padding: 40px 8%;
+  }
+
+  #settings-panel {
+    gap: 8px 18px;
+  }
+
+  input[type="range"] {
+    max-width: 28vw;
+  }
+}
+
 @media (max-width: 640px) {
-  #top-bar,
-  #seek-row,
-  #control-row {
-    padding-left: 14px;
-    padding-right: 14px;
+  #top-bar {
+    padding: 10px 14px;
+    padding-top: calc(10px + env(safe-area-inset-top, 0px));
+    gap: 8px 12px;
+  }
+
+  #brand {
+    font-size: 1.05rem;
+  }
+
+  #source-label {
+    order: 10;
+    flex: 1 1 100%;
+    font-size: 0.78rem;
+  }
+
+  #buffer-indicator {
+    margin-left: auto;
+    padding: 5px 9px;
+    flex-shrink: 0;
+  }
+
+  #buffer-status {
+    max-width: 45vw;
+  }
+}
+
+@media (max-width: 300px) {
+  #buffer-status {
+    display: none;
+  }
+
+  #buffer-indicator {
+    padding: 5px 7px;
   }
 
   #text-display {
-    padding: 32px 6%;
-    font-size: 1.15rem;
+    padding: 28px 5.5%;
+    font-size: 1.08rem;
+    line-height: 1.85;
+  }
+
+  .block.heading.h1 {
+    font-size: 1.6em;
+  }
+
+  .block.heading.h2 {
+    font-size: 1.35em;
   }
 
   #input-area {
@@ -928,22 +986,165 @@ input[type="range"]:disabled::-moz-range-thumb {
     padding: 20px;
   }
 
+  #input-card h1 {
+    font-size: 1.3rem;
+  }
+
+  #input-actions {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+
+  #btn-load-text {
+    width: 100%;
+    padding: 12px 20px;
+  }
+
+  #file-picker-label {
+    text-align: center;
+  }
+
+  #seek-row {
+    padding: 12px 14px 4px;
+    gap: 10px;
+  }
+
+  #progress-label {
+    min-width: 54px;
+    font-size: 0.75rem;
+  }
+
+  #control-row {
+    flex-direction: column;
+    align-items: stretch;
+    padding: 8px 14px 14px;
+    gap: 12px;
+  }
+
   #transport {
-    gap: 6px;
+    justify-content: center;
+    gap: 14px;
   }
 
   .transport-btn {
-    width: 34px;
-    height: 34px;
+    width: 40px;
+    height: 40px;
+    font-size: 1.05rem;
   }
 
   #settings-panel {
     margin-left: 0;
     width: 100%;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+    padding: 12px 14px;
+  }
+
+  .config-group {
+    width: 100%;
     justify-content: space-between;
   }
 
-  #buffer-status {
-    max-width: 120px;
+  .config-group-stacked {
+    width: 100%;
+  }
+
+  input[type="range"] {
+    width: 100%;
+    max-width: none;
+    flex: 1;
+  }
+
+  #control-dock {
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
+  #drop-overlay-text {
+    font-size: 1.4rem;
+    padding: 0 24px;
+    text-align: center;
+  }
+}
+
+@media (max-width: 380px) {
+  #top-bar {
+    padding: 8px 10px;
+    padding-top: calc(8px + env(safe-area-inset-top, 0px));
+  }
+
+  #brand {
+    font-size: 0.95rem;
+  }
+
+  .icon-btn {
+    width: 28px;
+    height: 28px;
+    font-size: 1rem;
+  }
+
+  #text-display {
+    padding: 22px 4%;
+    font-size: 1rem;
+  }
+
+  #input-card {
+    padding: 16px;
+  }
+
+  .transport-btn {
+    width: 36px;
+    height: 36px;
+  }
+}
+
+@media (max-height: 480px) {
+  #input-area {
+    padding: 16px;
+    align-items: flex-start;
+  }
+
+  #input-card {
+    padding: 18px 24px;
+  }
+
+  #input-card h1 {
+    font-size: 1.15rem;
+    margin-bottom: 4px;
+  }
+
+  .hint {
+    margin-bottom: 10px;
+    font-size: 0.82rem;
+  }
+
+  #paste-box {
+    min-height: 80px;
+  }
+
+  #input-actions {
+    margin-top: 10px;
+  }
+}
+
+@media (hover: none) and (pointer: coarse) {
+  .icon-btn {
+    width: 36px;
+    height: 36px;
+  }
+
+  input[type="range"]::-webkit-slider-thumb {
+    width: 20px;
+    height: 20px;
+  }
+
+  input[type="range"]::-moz-range-thumb {
+    width: 20px;
+    height: 20px;
+  }
+
+  .pill-btn {
+    padding: 9px 18px;
   }
 }
